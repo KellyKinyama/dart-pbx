@@ -1,7 +1,7 @@
-cat star_zesco_co_zm.crt DigiCertCA.crt > certificate_chain.crt
+cat star_zesco_co_zm.crt > certificate_chain.crt
 
 cp star_zesco_co_zm.crt certificate_chain.crt
-cat DigiCertCA.crt > certificate_chain.crt
+cat DigiCertCA.crt certificate_chain.crt> certificate_chain.crt
 
 openssl x509 -in mycert.crt -out mycert.pem -outform PEM
 
@@ -18,3 +18,6 @@ cat DigiCertGridCA-1.crt.pem
 
 dart compile exe bin/dart_pbx.dart
 
+
+//////
+cat  certificate_chain.crt star_zesco_co_zm.crt> certificate_chain2.crt

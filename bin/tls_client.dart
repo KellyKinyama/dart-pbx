@@ -9,30 +9,29 @@ void main() async {
   int server_port = 5068;
   String server_address = "msteams.zesco.co.zm";
 
-  try {
-    Socket socket = await SecureSocket.connect(server_address, server_port //,
-        //   onBadCertificate: (certificate) {
-        //  return false;
-        //}
-        );
+  //try {
+  Socket socket = await SecureSocket.connect(server_address, server_port,
+      onBadCertificate: (certificate) {
+    return true;
+  });
 
-    socket.listen((List<int> data) {
-      // Handle incoming data from the server
-      print(utf8.decode(data));
-    }, onDone: () {
-      // Handle when the connection is closed
-      print('Connection closed');
-    }, onError: (error) {
-      // Handle connection errors
-      print('Error: $error');
-    });
-
-    // Send data to the server
-    //socket.write('Hello, server!');
-  } catch (e) {
+  socket.listen((List<int> data) {
+    // Handle incoming data from the server
+    print(utf8.decode(data));
+  }, onDone: () {
+    // Handle when the connection is closed
+    print('Connection closed');
+  }, onError: (error) {
     // Handle connection errors
-    print('Failed to connect: $e');
-  }
+    print('Error: $error');
+  });
+
+  // Send data to the server
+  //socket.write('Hello, server!');
+  // } catch (e) {
+  //   // Handle connection errors
+  //   print('Failed to connect: $e');
+  // }
 
   // WebSocket.connect('wss://10.43.0.55:7089',
   //         headers: {"Sec-WebSocket-Protocol": "sip"})
