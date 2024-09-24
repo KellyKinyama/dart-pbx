@@ -1,6 +1,7 @@
 import 'package:dart_pbx/dart_pbx.dart' as dart_pbx;
 
 import 'package:dart_pbx/transports/sip_server.dart';
+import 'package:dart_pbx/transports/tls_client.dart';
 import 'package:dart_pbx/transports/tls_server.dart';
 import 'package:dart_pbx/transports/tcp_server.dart';
 import 'dart:io';
@@ -49,6 +50,9 @@ void main() async {
   String? path_to_private_key_file = env['PATH_TO_PRIVATE_KEY_FILE_PEM'];
   String? path_to_root_certificate = env['PATH_TO_ROOT_CERTIFICATE_FILE_PEM'];
 
+  String? msteamsDomainName = env['MS_TEAM_DOMAIN'];
+  int? msteamsPort = int.parse(env['MS_TEAMS_PORT']!);
+
   //SipServer sipServer =
   if (udpIp != null) {
     SipServer(udpIp, udpPort!);
@@ -78,6 +82,9 @@ void main() async {
         path_to_certificate_file!,
         path_to_private_key_file!,
         path_to_root_certificate!);
+
+    TlsClient(path_to_certificate_file, path_to_private_key_file,
+        path_to_root_certificate, msteamsDomainName!, msteamsPort);
   }
 
   // if (secureTcpIp != null) {
