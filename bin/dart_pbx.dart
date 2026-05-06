@@ -8,6 +8,7 @@ import 'dart:io';
 import 'package:dart_pbx/transports/ws_sip_server.dart';
 //import 'signal_jsonrpc_impl.dart' as ion;
 import 'package:dart_pbx/globals.dart';
+import 'package:dart_pbx/services/services.dart';
 import 'package:dart_pbx/transports/wss_sip_server.dart';
 import 'package:dart_pbx/sip_parser/sip.dart';
 
@@ -22,6 +23,36 @@ import '../lib/config/dispartcher.dart';
 //Function(dynamic resp)
 void main() async {
   var env = DotEnv(includePlatformEnvironment: true)..load();
+
+  // -------------------------------------------------------------------------
+  // Service registry assembly (Kamailio-style module loading).
+  // -------------------------------------------------------------------------
+  final sipRealm = env['SIP_REALM'];
+  final sipUsers = env['SIP_USERS'];
+  AuthService? authService;
+  if (sipRealm != null &&
+      sipRealm.isNotEmpty &&
+      sipUsers != null &&
+      sipUsers.isNotEmpty) {
+    final store = InMemoryCredentialsStore(realm: sipRealm);
+    for (final entry in sipUsers.split(',')) {
+      final pair = entry.trim();
+      if (pair.isEmpty) continue;
+      final colon = pair.indexOf(':');
+      if (colon <= 0) continue;
+      final user = pair.substring(0, colon).trim();
+      final pass = pair.substring(colon + 1);
+      if (user.isEmpty) continue;
+      store.put(user, password: pass);
+    }
+    authService = AuthService(
+      digest: DigestAuth(realm: sipRealm, secret: env['SIP_AUTH_SECRET']),
+      credentials: store,
+    );
+  }
+
+  final services = ServiceRegistry(auth: authService);
+  configureRequestsHandler(services: services);
 
   String? udpIp = env['UPD_SERVER_ADDRESS'];
   int? udpPort = env['UDP_SERVER_PORT'] != null
@@ -55,7 +86,10 @@ void main() async {
 
   //SipServer sipServer =
   if (udpIp != null) {
-    SipServer(udpIp, udpPort!);
+    final asteriskHost = env['ASTERISK_HOST'];
+    final asteriskPort = int.tryParse(env['ASTERISK_PORT'] ?? '') ?? 5060;
+    SipServer(udpIp, udpPort!,
+        upstreamHost: asteriskHost, upstreamPort: asteriskPort);
   }
   //wsSipServer wsSever =
   if (wsIp != null) {

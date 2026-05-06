@@ -68,6 +68,12 @@ class SipMsg {
           var lhdr =
               line.substring(0, spos); //strings.ToLower(string(line[0:spos]))
           var lval = line.substring(spos + 1);
+          // Strip a single optional whitespace after ':' so per-header parsers
+          // and direct ".Value" assignments don't capture the SP that follows
+          // the colon on every header line.
+          if (lval.isNotEmpty && (lval[0] == ' ' || lval[0] == '\t')) {
+            lval = lval.substring(1);
+          }
 
           lhdr = lhdr.toLowerCase();
 

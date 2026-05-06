@@ -17,7 +17,12 @@ class sipCseq {
   void parseSipCseq(String v) {
     Src = v;
 
+    // Skip leading whitespace (the value passed in by the dispatcher still
+    // includes the space after the colon).
     var pos = 0;
+    while (pos < v.length && (v[pos] == ' ' || v[pos] == '\t')) {
+      pos++;
+    }
     ParseState state = ParseState.FIELD_ID;
 
     // Init the output area
