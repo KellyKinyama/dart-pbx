@@ -23,6 +23,9 @@ services:
       - ./asterisk_configs/pjsip.conf:/etc/asterisk/pjsip.conf
       - ./asterisk_configs/manager.conf:/etc/asterisk/manager.conf
       - ./asterisk_configs/rtp.conf:/etc/asterisk/rtp.conf
+      # --- Call-center / queues (fully dynamic; agents.conf not needed) ---
+      - ./asterisk_configs/queues.conf:/etc/asterisk/queues.conf
+      - ./asterisk_configs/queuerules.conf:/etc/asterisk/queuerules.conf
       # - ./asterisk_configs/logger.conf:/etc/asterisk/logger.conf
       # - ./asterisk_configs/voicemail.conf:/etc/asterisk/voicemail.conf
 
