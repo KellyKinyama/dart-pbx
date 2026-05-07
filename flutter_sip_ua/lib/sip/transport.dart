@@ -161,6 +161,7 @@ class SipUdpTransport implements SipTransport {
   RawDatagramSocket? _socket;
   StreamSubscription<RawSocketEvent>? _sub;
   InternetAddress? _remoteAddr;
+  String? _resolvedLocalHost;
 
   final _stateCtl = StreamController<TransportState>.broadcast();
   final _messageCtl = StreamController<SipMessage>.broadcast();
@@ -178,6 +179,11 @@ class SipUdpTransport implements SipTransport {
   String get localHost {
     final s = _socket;
     if (s == null) return localBind ?? '0.0.0.0';
+    // Prefer the address resolved at connect time. The socket itself reports
+    // 0.0.0.0 when bound to anyIPv4, which is unroutable in Contact/Via and
+    // is rejected by Asterisk with 403 Forbidden.
+    final resolved = _resolvedLocalHost;
+    if (resolved != null && resolved.isNotEmpty) return resolved;
     final a = s.address.address;
     if (a == '0.0.0.0' || a == '::') return localBind ?? a;
     return a;
@@ -204,12 +210,38 @@ class SipUdpTransport implements SipTransport {
         }
         _remoteAddr = list.first;
       }
+      _resolvedLocalHost = await _discoverLocalAddress(_remoteAddr!);
       _sub = _socket!.listen(_onEvent);
       _stateCtl.add(TransportState.connected);
     } catch (_) {
       _stateCtl.add(TransportState.disconnected);
       rethrow;
     }
+  }
+
+  /// Pick a usable local IPv4 to advertise in Via/Contact. When the remote
+  /// is loopback we must reply on loopback as well; otherwise fall back to
+  /// the first non-loopback IPv4 interface (best-effort — no route table
+  /// access from pure Dart).
+  static Future<String> _discoverLocalAddress(InternetAddress remote) async {
+    if (remote.isLoopback) return remote.address;
+    try {
+      final ifaces = await NetworkInterface.list(
+        includeLoopback: false,
+        includeLinkLocal: false,
+        type: InternetAddressType.IPv4,
+      );
+      for (final iface in ifaces) {
+        for (final a in iface.addresses) {
+          if (a.type == InternetAddressType.IPv4 && !a.isLoopback) {
+            return a.address;
+          }
+        }
+      }
+    } catch (_) {
+      /* fall through */
+    }
+    return remote.isLoopback ? '127.0.0.1' : '0.0.0.0';
   }
 
   @override
@@ -219,6 +251,7 @@ class SipUdpTransport implements SipTransport {
     _socket?.close();
     _socket = null;
     _remoteAddr = null;
+    _resolvedLocalHost = null;
     _stateCtl.add(TransportState.disconnected);
   }
 

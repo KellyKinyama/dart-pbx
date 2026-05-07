@@ -88,6 +88,43 @@ class _HomePageState extends State<HomePage> {
     await widget.ua.start(account);
   }
 
+  Future<void> _signOut() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Sign out?'),
+        content: const Text(
+          'This clears the saved account credentials and unregisters from the server.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Sign out'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    try {
+      await widget.ua.stop();
+    } catch (_) {
+      /* best-effort */
+    }
+    await widget.prefs.remove(_prefsKey);
+    if (!mounted) return;
+    setState(() {
+      _reg = RegistrationState.unregistered;
+      _recents.clear();
+      _everActive.clear();
+      _messages.clear();
+    });
+    _openLogin();
+  }
+
   Future<void> _openLogin() async {
     if (!mounted) return;
     final initial = widget.ua.account;
@@ -182,10 +219,23 @@ class _HomePageState extends State<HomePage> {
             padding: const EdgeInsets.symmetric(vertical: 12),
             child: RegistrationStatusChip(state: _reg),
           ),
-          IconButton(
+          PopupMenuButton<String>(
             tooltip: 'Account',
             icon: const Icon(Icons.manage_accounts_outlined),
-            onPressed: _openLogin,
+            onSelected: (v) {
+              switch (v) {
+                case 'edit':
+                  _openLogin();
+                  break;
+                case 'signout':
+                  _signOut();
+                  break;
+              }
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'edit', child: Text('Edit account')),
+              PopupMenuItem(value: 'signout', child: Text('Sign out')),
+            ],
           ),
           const SizedBox(width: 4),
         ],

@@ -34,6 +34,23 @@ class _CallPageState extends State<CallPage>
   @override
   void initState() {
     super.initState();
+    // Seed from the UA so we render the real state immediately. The
+    // callStream is broadcast and won't replay the event that triggered
+    // navigation here, so without this we'd be stuck on a spinner until
+    // the next state change.
+    final initial = widget.ua.callById(widget.callId);
+    if (initial != null) {
+      _call = initial;
+      if (initial.state == CallState.active) {
+        _activeSince = initial.startedAt ?? DateTime.now();
+        _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+          if (!mounted) return;
+          setState(() {
+            _elapsed = DateTime.now().difference(_activeSince!);
+          });
+        });
+      }
+    }
     _sub = widget.ua.callStream.listen((c) {
       if (c.id != widget.callId) return;
       _onUpdate(c);

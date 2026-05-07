@@ -26,6 +26,7 @@ import 'audio/audio_sink.dart';
 import 'audio/media_session.dart';
 import 'digest.dart';
 import 'sdp.dart';
+import 'sip_file_logger.dart';
 import 'sip_message.dart';
 import 'transport.dart';
 import 'video/video_codec.dart';
@@ -119,6 +120,10 @@ class SipUserAgent {
   final AudioSink Function()? _audioSinkFactory;
   final _uuid = const Uuid();
 
+  /// Optional sink that records every wire-format SIP message to disk.
+  /// Set with [attachFileLogger] before calling [start] for full coverage.
+  SipFileLogger? _fileLogger;
+
   SipAccount? _account;
   SipTransport? _transport;
   StreamSubscription<SipMessage>? _msgSub;
@@ -149,6 +154,19 @@ class SipUserAgent {
   RegistrationState _regState = RegistrationState.unregistered;
   RegistrationState get registrationState => _regState;
   SipAccount? get account => _account;
+
+  /// Snapshot of the call with [callId], or `null` if no such call is
+  /// active. Lets the UI seed itself synchronously instead of waiting for
+  /// the next [callStream] emission (which broadcast semantics don't
+  /// replay).
+  SipCall? callById(String callId) => _calls[callId]?.call;
+
+  /// Attach a wire-format file logger. Every subsequent inbound/outbound
+  /// SIP message is written to [logger]'s file verbatim.
+  void attachFileLogger(SipFileLogger logger) {
+    _fileLogger = logger;
+    _log('file logger: writing wire dump to ${logger.path}');
+  }
 
   // ===========================================================================
   // Lifecycle
@@ -470,6 +488,7 @@ class SipUserAgent {
 
   void _onTransportState(TransportState s) {
     _log('transport: $s');
+    _fileLogger?.note('transport: $s');
     switch (s) {
       case TransportState.connecting:
         _setRegState(RegistrationState.registering);
@@ -486,10 +505,25 @@ class SipUserAgent {
   }
 
   void _onMessage(SipMessage msg) {
+    _fileLogger?.log('IN ', msg);
     _log(
       '<-- ${msg.isResponse ? "${msg.statusCode} ${msg.reasonPhrase}" : "${msg.method} ${msg.requestUri}"}',
     );
     if (msg.isResponse) {
+      // Surface the server's reason on failure so the user/dev can read why
+      // a call was rejected (e.g. Asterisk's 488 'SDP not acceptable').
+      final code = msg.statusCode ?? 0;
+      if (code >= 300) {
+        final warning = msg.header('Warning');
+        if (warning != null) _log('    Warning: $warning');
+        final body = msg.body.trim();
+        if (body.isNotEmpty) {
+          for (final line in body.split('\n')) {
+            final t = line.trimRight();
+            if (t.isNotEmpty) _log('    | $t');
+          }
+        }
+      }
       _onResponse(msg);
     } else {
       _onRequest(msg);
@@ -892,7 +926,7 @@ class SipUserAgent {
       target: ctx.call.remoteParty,
       account: acc,
       extra: extra,
-      body: _buildOfferSdp(acc),
+      body: _buildOfferSdpForCall(ctx, acc),
     );
     ctx.cseq = newCseq;
     ctx.branch = newBranch;
@@ -1114,20 +1148,29 @@ class SipUserAgent {
     _send(resp);
   }
 
-  void _sendAck(_CallContext ctx, SipMessage ok) {
+  void _sendAck(_CallContext ctx, SipMessage resp) {
     final acc = _account;
     if (acc == null) return;
-    final target = ctx.remoteContact ?? ctx.call.remoteParty;
+    final code = resp.statusCode ?? 0;
+    final isTwoXx = code >= 200 && code < 300;
+    // RFC 3261 §17.1.1.3: ACK to a non-2xx final response is part of the
+    // INVITE *server* transaction and MUST reuse the INVITE's branch and
+    // Request-URI. RFC 3261 §13.2.2.4: ACK to a 2xx is a new transaction,
+    // gets a fresh branch, and is sent to the remote target (Contact).
+    final target = isTwoXx
+        ? (ctx.remoteContact ?? ctx.call.remoteParty)
+        : ctx.call.remoteParty;
+    final branch = isTwoXx ? _branch() : ctx.branch;
     final ack = _buildRequest(
       method: 'ACK',
       requestUri: target,
       callId: ctx.call.id,
       fromTag: ctx.localTag,
       cseq: ctx.cseq,
-      branch: _branch(),
+      branch: branch,
       target: target,
       account: acc,
-      toTag: ok.toTag ?? ctx.remoteTag,
+      toTag: resp.toTag ?? ctx.remoteTag,
     );
     _send(ack);
   }
@@ -1178,7 +1221,7 @@ class SipUserAgent {
       target: ctx.call.remoteParty,
       account: acc,
       extra: extra,
-      body: _buildOfferSdp(acc),
+      body: _buildOfferSdpForCall(ctx, acc),
     );
     ctx.cseq = newCseq;
     ctx.branch = newBranch;
@@ -1272,6 +1315,7 @@ class SipUserAgent {
   }
 
   void _send(SipMessage msg) {
+    _fileLogger?.log('OUT', msg);
     _log(
       '--> ${msg.isResponse ? "${msg.statusCode} ${msg.reasonPhrase}" : "${msg.method} ${msg.requestUri}"}',
     );
