@@ -93,5 +93,66 @@ a=recvonly
       expect(ep.rtcpPort, 4002);
       expect(ep.telephoneEventPt, 96);
     });
+
+    test('parseSdpAudio captures telephone-event fmtp range', () {
+      const body =
+          'v=0\r\n'
+          'o=- 1 1 IN IP4 1.2.3.4\r\n'
+          'c=IN IP4 1.2.3.4\r\n'
+          't=0 0\r\n'
+          'm=audio 5000 RTP/AVP 8 101\r\n'
+          'a=rtpmap:8 PCMA/8000\r\n'
+          'a=rtpmap:101 telephone-event/8000\r\n'
+          'a=fmtp:101 0-16\r\n';
+      final parsed = parseSdpAudio(body);
+      expect(parsed, isNotNull);
+      expect(parsed!.telephoneEventPt, 101);
+      expect(parsed.telephoneEventRange, '0-16');
+    });
+
+    test('buildG711Answer emits codec intersection only', () {
+      // Peer offered PCMA + DTMF on PT 101 with an extended range.
+      final remote = SdpAudio(
+        host: '10.0.0.1',
+        port: 30000,
+        codec: G711Variant.pcma,
+        telephoneEventPt: 101,
+        telephoneEventRange: '0-16',
+      );
+      final answer = buildG711Answer(
+        username: '7000',
+        localHost: '10.0.0.5',
+        localPort: 40000,
+        remoteOffer: remote,
+        rtcpPort: 40001,
+      );
+      // Only PCMA + DTMF, never PCMU.
+      expect(answer, contains('m=audio 40000 RTP/AVP 8 101'));
+      expect(answer, isNot(contains('a=rtpmap:0 PCMU/8000')));
+      expect(answer, contains('a=rtpmap:8 PCMA/8000'));
+      // Mirrored DTMF range from the offer.
+      expect(answer, contains('a=fmtp:101 0-16'));
+      expect(answer, contains('a=rtcp:40001'));
+      expect(answer, contains('a=sendrecv'));
+    });
+
+    test('buildG711Offer with explicit sessionId / version is stable', () {
+      final a = buildG711Offer(
+        username: 'x',
+        localHost: '1.1.1.1',
+        localPort: 5000,
+        sessionId: 12345,
+        sessionVersion: 12345,
+      );
+      final b = buildG711Offer(
+        username: 'x',
+        localHost: '1.1.1.1',
+        localPort: 5000,
+        sessionId: 12345,
+        sessionVersion: 12346,
+      );
+      expect(a, contains('o=x 12345 12345 IN IP4 1.1.1.1'));
+      expect(b, contains('o=x 12345 12346 IN IP4 1.1.1.1'));
+    });
   });
 }

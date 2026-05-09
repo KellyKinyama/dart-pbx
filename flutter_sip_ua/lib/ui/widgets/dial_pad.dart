@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../bp_palette.dart';
+
 /// A telephone-style 3×4 keypad. Tapping a key invokes [onKey] with the
 /// digit character (`0`-`9`, `*`, `#`). The optional [onLongZero] is
 /// fired when the user long-presses `0` (commonly used to enter `+`).
@@ -24,36 +26,36 @@ class DialPad extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
     return LayoutBuilder(
       builder: (context, constraints) {
-        // Square keys, sized so 3 fit per row with comfortable gaps.
-        const gap = 12.0;
+        const gap = 14.0;
         final width = constraints.maxWidth;
-        final keySize = ((width - gap * 2) / 3).clamp(56.0, 96.0);
-        final pad = compact ? 6.0 : 10.0;
+        // Browser-Phone .dialButtons are 55px round; we let them flex on
+        // narrow screens but keep the BP look on regular widths.
+        final keySize = ((width - gap * 2) / 3).clamp(
+          compact ? 48.0 : 55.0,
+          compact ? 64.0 : 72.0,
+        );
+        // BP keeps rows visually tight (the 7px digit margin only applies
+        // inside the button); we just need a small gap between rows.
+        final rowGap = compact ? 4.0 : 8.0;
         return Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            for (final row in _rows) ...[
-              Padding(
-                padding: EdgeInsets.symmetric(vertical: pad),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    for (final k in row)
-                      _KeyButton(
-                        size: keySize,
-                        digit: k.digit,
-                        letters: k.letters,
-                        onTap: () => onKey(k.digit),
-                        onLongPress: k.digit == '0' ? onLongZero : null,
-                        accent: k.digit == '*' || k.digit == '#'
-                            ? scheme.tertiary
-                            : null,
-                      ),
-                  ],
-                ),
+            for (var i = 0; i < _rows.length; i++) ...[
+              if (i > 0) SizedBox(height: rowGap),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  for (final k in _rows[i])
+                    _KeyButton(
+                      size: keySize,
+                      digit: k.digit,
+                      letters: k.letters,
+                      onTap: () => onKey(k.digit),
+                      onLongPress: k.digit == '0' ? onLongZero : null,
+                    ),
+                ],
               ),
             ],
           ],
@@ -76,7 +78,6 @@ class _KeyButton extends StatelessWidget {
     required this.letters,
     required this.onTap,
     this.onLongPress,
-    this.accent,
   });
 
   final double size;
@@ -84,19 +85,29 @@ class _KeyButton extends StatelessWidget {
   final String letters;
   final VoidCallback onTap;
   final VoidCallback? onLongPress;
-  final Color? accent;
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final fg = accent ?? scheme.onSurface;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    // Browser-Phone .dialButtons:
+    //   light: bg #eeeeee  text #3478f3 (.dialButtons span -> #999)
+    //   dark : bg #404040  text #cccccc (.dialButtons span -> #999)
+    //   :active (pressed)  bg #666666   text #ffffff   (both modes)
+    final isDark = theme.brightness == Brightness.dark;
+    final bg = isDark ? const Color(0xFF404040) : const Color(0xFFEEEEEE);
+    final fg = isDark ? const Color(0xFFCCCCCC) : scheme.primary;
     return Material(
-      color: scheme.surfaceContainerHigh,
+      color: bg,
       shape: const CircleBorder(),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,
         onLongPress: onLongPress,
+        // BP `.dialButtons:active { background-color: #666666; color: #FFFFFF }`
+        // — the splash colour mimics the same dark grey flash.
+        splashColor: const Color(0xFF666666).withValues(alpha: 0.45),
+        highlightColor: const Color(0xFF666666).withValues(alpha: 0.20),
         child: SizedBox(
           width: size,
           height: size,
@@ -119,11 +130,40 @@ class _KeyButton extends StatelessWidget {
                   style: TextStyle(
                     fontSize: size * 0.13,
                     letterSpacing: 1.4,
-                    color: scheme.onSurfaceVariant,
+                    color: const Color(0xFF999999),
                   ),
                 ),
               ],
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Big circular green dial button matching Browser-Phone's `.dialButtonsDial`.
+class DialCallButton extends StatelessWidget {
+  const DialCallButton({super.key, required this.onPressed, this.size = 64});
+
+  final VoidCallback? onPressed;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final bp = Theme.of(context).bp;
+    final disabled = onPressed == null;
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Material(
+        color: disabled ? bp.dial.withValues(alpha: 0.4) : bp.dial,
+        shape: const CircleBorder(),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onPressed,
+          child: Center(
+            child: Icon(Icons.call, color: Colors.white, size: size * 0.45),
           ),
         ),
       ),

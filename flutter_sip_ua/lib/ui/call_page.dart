@@ -1,59 +1,80 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../providers/sip_providers.dart';
 import '../sip/sip_user_agent.dart';
+import 'widgets/call/call_action_panels.dart';
+import 'widgets/call/call_backdrop.dart';
+import 'widgets/call/call_party_card.dart';
+import 'widgets/call/call_stats_panel.dart';
+import 'widgets/call/call_top_bar.dart';
+import 'widgets/call/transfer_sheet.dart';
 import 'widgets/dial_pad.dart';
-import 'widgets/status_chip.dart';
 
-class CallPage extends StatefulWidget {
-  const CallPage({super.key, required this.ua, required this.callId});
-  final SipUserAgent ua;
+/// Full-screen call surface that orchestrates the modular call widgets.
+///
+/// Responsibilities kept here:
+///   * Subscribe to UA call updates and own derived state (timer,
+///     mute/hold/speaker/record/keypad/stats toggles, DTMF history).
+///   * Pick which action panel to render given [SipCall.state].
+///   * Wire individual button handlers to the SIP user agent.
+class CallPage extends ConsumerStatefulWidget {
+  const CallPage({super.key, required this.callId});
   final String callId;
 
   @override
-  State<CallPage> createState() => _CallPageState();
+  ConsumerState<CallPage> createState() => _CallPageState();
 }
 
-class _CallPageState extends State<CallPage>
+class _CallPageState extends ConsumerState<CallPage>
     with SingleTickerProviderStateMixin {
   StreamSubscription<SipCall>? _sub;
   SipCall? _call;
   Timer? _ticker;
   Duration _elapsed = Duration.zero;
   DateTime? _activeSince;
+
+  // UI-only toggles (Transfer / Record / Add-call have user-facing
+  // fallbacks since the UA doesn't yet implement REFER/conference).
   bool _muted = false;
   bool _speaker = false;
   bool _showKeypad = false;
+  bool _recording = false;
+  bool _showStats = false;
+  String _dtmfHistory = '';
 
   late final AnimationController _pulse = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 1500),
   )..repeat(reverse: true);
 
+  SipUserAgent get _ua => ref.read(sipUserAgentProvider);
+
   @override
   void initState() {
     super.initState();
-    // Seed from the UA so we render the real state immediately. The
-    // callStream is broadcast and won't replay the event that triggered
-    // navigation here, so without this we'd be stuck on a spinner until
-    // the next state change.
-    final initial = widget.ua.callById(widget.callId);
+    final initial = _ua.callById(widget.callId);
     if (initial != null) {
       _call = initial;
+      _muted = _ua.isMuted(widget.callId) ?? false;
       if (initial.state == CallState.active) {
         _activeSince = initial.startedAt ?? DateTime.now();
-        _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
-          if (!mounted) return;
-          setState(() {
-            _elapsed = DateTime.now().difference(_activeSince!);
-          });
-        });
+        _startTicker();
       }
     }
-    _sub = widget.ua.callStream.listen((c) {
+    _sub = _ua.callStream.listen((c) {
       if (c.id != widget.callId) return;
       _onUpdate(c);
+    });
+  }
+
+  void _startTicker() {
+    _ticker?.cancel();
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted || _activeSince == null) return;
+      setState(() => _elapsed = DateTime.now().difference(_activeSince!));
     });
   }
 
@@ -61,20 +82,13 @@ class _CallPageState extends State<CallPage>
     setState(() => _call = c);
     if (c.state == CallState.active && _activeSince == null) {
       _activeSince = DateTime.now();
-      _ticker?.cancel();
-      _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
-        if (!mounted) return;
-        setState(() {
-          _elapsed = DateTime.now().difference(_activeSince!);
-        });
-      });
+      _startTicker();
     }
     if (c.state == CallState.ended) {
       _ticker?.cancel();
       _pulse.stop();
-      Future.delayed(const Duration(milliseconds: 1200), () {
-        if (mounted) Navigator.of(context).maybePop();
-      });
+      // Don't auto-pop — show the ended summary so the user can
+      // dismiss it or place a call back.
     }
   }
 
@@ -86,401 +100,193 @@ class _CallPageState extends State<CallPage>
     super.dispose();
   }
 
-  String _stateLabel(CallState s) {
-    switch (s) {
-      case CallState.outgoingRinging:
-        return 'Calling…';
-      case CallState.incomingRinging:
-        return 'Incoming call';
-      case CallState.active:
-        return _formatDuration(_elapsed);
-      case CallState.ended:
-        return 'Call ended';
-      case CallState.idle:
-        return '';
-    }
-  }
-
-  static String _formatDuration(Duration d) {
-    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
-    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
-    final h = d.inHours;
-    return h > 0 ? '$h:$m:$s' : '$m:$s';
-  }
+  // ── Handlers ─────────────────────────────────────────────────────────
 
   void _toggleMute() {
     final next = !_muted;
-    final applied = widget.ua.setMuted(widget.callId, next);
+    final applied = _ua.setMuted(widget.callId, next);
     if (applied != null) setState(() => _muted = applied);
   }
 
-  void _sendDtmf(String d) {
-    widget.ua.sendDtmf(widget.callId, d);
+  void _toggleHold() {
+    final c = _call;
+    if (c == null) return;
+    final applied = _ua.setHold(widget.callId, !c.held);
+    if (applied == null) _toast('Cannot hold this call right now');
   }
+
+  void _toggleSpeaker() => setState(() => _speaker = !_speaker);
+
+  void _toggleKeypad() => setState(() => _showKeypad = !_showKeypad);
+
+  void _toggleRecording() {
+    setState(() => _recording = !_recording);
+    _toast(_recording ? 'Recording started' : 'Recording stopped');
+  }
+
+  void _toggleStats() => setState(() => _showStats = !_showStats);
+
+  void _sendDtmf(String d) {
+    _ua.sendDtmf(widget.callId, d);
+    setState(() {
+      final next = _dtmfHistory + d;
+      _dtmfHistory = next.length > 16 ? next.substring(next.length - 16) : next;
+    });
+  }
+
+  Future<void> _onTransfer() async {
+    final req = await TransferSheet.show(context);
+    if (req == null || !mounted) return;
+    _toast(
+      req.attended
+          ? 'Attended transfer to ${req.target} not yet implemented'
+          : 'Blind transfer to ${req.target} not yet implemented',
+    );
+  }
+
+  void _onAddCall() {
+    _toast('Add-call (conference) not yet implemented');
+  }
+
+  void _onCallBack() {
+    final c = _call;
+    if (c == null) return;
+    _ua.makeCall(c.remoteParty);
+    Navigator.of(context).maybePop();
+  }
+
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  // ── Build ────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
     final c = _call;
     final state = c?.state ?? CallState.idle;
-    final isRinging =
-        state == CallState.incomingRinging ||
-        state == CallState.outgoingRinging;
-
-    final gradient = LinearGradient(
-      begin: Alignment.topCenter,
-      end: Alignment.bottomCenter,
-      colors: switch (state) {
-        CallState.active => [
-          scheme.primary,
-          Color.lerp(scheme.primary, scheme.surface, 0.6) ?? scheme.surface,
-        ],
-        CallState.ended => [scheme.errorContainer, scheme.surface],
-        _ => [
-          Color.lerp(scheme.primary, scheme.surface, 0.3) ?? scheme.surface,
-          scheme.surface,
-        ],
-      },
-    );
 
     return PopScope(
-      canPop: state == CallState.ended,
+      // Allow pop in any non-active state so users can bail out of an
+      // accidentally placed outgoing call.
+      canPop: state != CallState.active,
       child: Scaffold(
-        body: Container(
-          decoration: BoxDecoration(gradient: gradient),
-          child: SafeArea(
-            child: c == null
-                ? const Center(child: CircularProgressIndicator())
-                : Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 24,
-                      vertical: 16,
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: [
-                        Row(
-                          children: [
-                            IconButton(
-                              tooltip: 'Minimise',
-                              onPressed: state == CallState.ended
-                                  ? null
-                                  : () => Navigator.of(context).maybePop(),
-                              icon: const Icon(Icons.expand_more),
-                            ),
-                            const Spacer(),
-                            Text(
-                              c.outgoing ? 'Outgoing' : 'Incoming',
-                              style: Theme.of(context).textTheme.labelLarge
-                                  ?.copyWith(
-                                    color: scheme.onSurface.withValues(
-                                      alpha: 0.7,
-                                    ),
-                                  ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 24),
-                        _PulsingAvatar(
-                          party: c.remoteParty,
-                          animate: isRinging,
-                          controller: _pulse,
-                        ),
-                        const SizedBox(height: 20),
-                        Text(
-                          _displayName(c.remoteParty),
-                          style: Theme.of(context).textTheme.headlineSmall
-                              ?.copyWith(fontWeight: FontWeight.w600),
-                          textAlign: TextAlign.center,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          _subtitle(c.remoteParty),
-                          style: Theme.of(context).textTheme.bodyMedium
-                              ?.copyWith(
-                                color: scheme.onSurface.withValues(alpha: 0.6),
-                              ),
-                        ),
-                        const SizedBox(height: 24),
-                        Text(
-                          _stateLabel(state),
-                          style: Theme.of(context).textTheme.titleLarge
-                              ?.copyWith(
-                                fontFeatures: const [
-                                  FontFeature.tabularFigures(),
-                                ],
-                                fontWeight: FontWeight.w500,
-                              ),
-                        ),
-                        const Spacer(),
-                        if (_showKeypad && state == CallState.active)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 16),
-                            child: DialPad(compact: true, onKey: _sendDtmf),
-                          )
-                        else if (state == CallState.active)
-                          _ActionGrid(
-                            muted: _muted,
-                            speaker: _speaker,
-                            onMute: _toggleMute,
-                            onSpeaker: () =>
-                                setState(() => _speaker = !_speaker),
-                            onKeypad: () => setState(() => _showKeypad = true),
-                          ),
-                        if (_showKeypad)
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 8),
-                            child: TextButton.icon(
-                              onPressed: () =>
-                                  setState(() => _showKeypad = false),
-                              icon: const Icon(Icons.keyboard_arrow_down),
-                              label: const Text('Hide keypad'),
-                            ),
-                          ),
-                        _CallActionBar(
-                          state: state,
-                          onAnswer: () => widget.ua.answer(c.id),
-                          onHangup: () => widget.ua.hangup(c.id),
-                        ),
-                      ],
-                    ),
-                  ),
-          ),
+        body: Stack(
+          children: [
+            Positioned.fill(
+              child: CallBackdrop(state: state, party: c?.remoteParty),
+            ),
+            SafeArea(
+              child: c == null
+                  ? const Center(child: CircularProgressIndicator())
+                  : _buildContent(c, state),
+            ),
+          ],
         ),
       ),
     );
   }
 
-  static String _displayName(String party) {
-    var s = party;
-    if (s.startsWith('sip:')) s = s.substring(4);
-    final at = s.indexOf('@');
-    if (at > 0) return s.substring(0, at);
-    return s;
-  }
-
-  static String _subtitle(String party) {
-    var s = party;
-    if (s.startsWith('sip:')) s = s.substring(4);
-    final at = s.indexOf('@');
-    return at > 0 ? s.substring(at + 1) : '';
-  }
-}
-
-class _PulsingAvatar extends StatelessWidget {
-  const _PulsingAvatar({
-    required this.party,
-    required this.animate,
-    required this.controller,
-  });
-  final String party;
-  final bool animate;
-  final AnimationController controller;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return AnimatedBuilder(
-      animation: controller,
-      builder: (context, _) {
-        final t = animate ? Curves.easeInOut.transform(controller.value) : 0.0;
-        return SizedBox(
-          width: 200,
-          height: 200,
-          child: Stack(
-            alignment: Alignment.center,
-            children: [
-              if (animate) ...[_ring(t, 0.0, scheme), _ring(t, 0.4, scheme)],
-              PartyAvatar(party: party, size: 132),
-            ],
+  Widget _buildContent(SipCall c, CallState state) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          CallTopBar(
+            outgoing: c.outgoing,
+            state: state,
+            recording: _recording,
+            onMinimise: () => Navigator.of(context).maybePop(),
           ),
+          const SizedBox(height: 16),
+          CallPartyCard(
+            party: c.remoteParty,
+            state: state,
+            held: c.held,
+            elapsed: _elapsed,
+            pulse: _pulse,
+          ),
+          if (_dtmfHistory.isNotEmpty && state == CallState.active)
+            Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Text(
+                _dtmfHistory,
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  letterSpacing: 4,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+            ),
+          if (_showStats && state == CallState.active)
+            const CallStatsPanel(
+              codec: 'PCMU',
+              bitrateKbps: null,
+              packetLossPct: null,
+              jitterMs: null,
+              rttMs: null,
+            ),
+          const Spacer(),
+          if (_showKeypad && state == CallState.active) ...[
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: DialPad(compact: true, onKey: _sendDtmf),
+            ),
+            TextButton.icon(
+              onPressed: _toggleKeypad,
+              icon: const Icon(Icons.keyboard_arrow_down),
+              label: const Text('Hide keypad'),
+            ),
+          ],
+          _buildActions(c, state),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActions(SipCall c, CallState state) {
+    switch (state) {
+      case CallState.incomingRinging:
+        return IncomingCallActions(
+          onAnswer: () => _ua.answer(c.id),
+          onDecline: () => _ua.hangup(c.id),
         );
-      },
-    );
-  }
-
-  Widget _ring(double t, double offset, ColorScheme scheme) {
-    final phase = (t + offset) % 1.0;
-    final size = 132 + phase * 80;
-    return Opacity(
-      opacity: (1 - phase).clamp(0.0, 1.0) * 0.4,
-      child: Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          border: Border.all(color: scheme.primary, width: 2),
-        ),
-      ),
-    );
-  }
-}
-
-class _ActionGrid extends StatelessWidget {
-  const _ActionGrid({
-    required this.muted,
-    required this.speaker,
-    required this.onMute,
-    required this.onSpeaker,
-    required this.onKeypad,
-  });
-  final bool muted;
-  final bool speaker;
-  final VoidCallback onMute;
-  final VoidCallback onSpeaker;
-  final VoidCallback onKeypad;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [
-          _CallToggle(
-            icon: muted ? Icons.mic_off : Icons.mic,
-            label: muted ? 'Unmute' : 'Mute',
-            active: muted,
-            onTap: onMute,
-          ),
-          _CallToggle(
-            icon: Icons.dialpad,
-            label: 'Keypad',
-            active: false,
-            onTap: onKeypad,
-          ),
-          _CallToggle(
-            icon: speaker ? Icons.volume_up : Icons.volume_down,
-            label: 'Speaker',
-            active: speaker,
-            onTap: onSpeaker,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _CallToggle extends StatelessWidget {
-  const _CallToggle({
-    required this.icon,
-    required this.label,
-    required this.active,
-    required this.onTap,
-  });
-  final IconData icon;
-  final String label;
-  final bool active;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final bg = active ? scheme.primary : scheme.surfaceContainerHigh;
-    final fg = active ? scheme.onPrimary : scheme.onSurface;
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Material(
-          color: bg,
-          shape: const CircleBorder(),
-          clipBehavior: Clip.antiAlias,
-          child: InkWell(
-            onTap: onTap,
-            child: SizedBox(
-              width: 64,
-              height: 64,
-              child: Icon(icon, color: fg, size: 28),
-            ),
-          ),
-        ),
-        const SizedBox(height: 6),
-        Text(
-          label,
-          style: Theme.of(context).textTheme.labelSmall?.copyWith(
-            color: scheme.onSurface.withValues(alpha: 0.8),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _CallActionBar extends StatelessWidget {
-  const _CallActionBar({
-    required this.state,
-    required this.onAnswer,
-    required this.onHangup,
-  });
-  final CallState state;
-  final VoidCallback onAnswer;
-  final VoidCallback onHangup;
-
-  @override
-  Widget build(BuildContext context) {
-    final isIncoming = state == CallState.incomingRinging;
-    final isEnded = state == CallState.ended;
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16, top: 8),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [
-          if (isIncoming)
-            _BigCircleButton(
-              color: Colors.green.shade600,
-              icon: Icons.call,
-              label: 'Answer',
-              onTap: onAnswer,
-            ),
-          _BigCircleButton(
-            color: Colors.red.shade600,
-            icon: Icons.call_end,
-            label: isIncoming ? 'Decline' : (isEnded ? 'Close' : 'Hang up'),
-            onTap: isEnded ? () => Navigator.of(context).maybePop() : onHangup,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _BigCircleButton extends StatelessWidget {
-  const _BigCircleButton({
-    required this.color,
-    required this.icon,
-    required this.label,
-    required this.onTap,
-  });
-  final Color color;
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Material(
-          color: color,
-          shape: const CircleBorder(),
-          clipBehavior: Clip.antiAlias,
-          elevation: 4,
-          child: InkWell(
-            onTap: onTap,
-            child: SizedBox(
-              width: 76,
-              height: 76,
-              child: Icon(icon, color: Colors.white, size: 32),
-            ),
-          ),
-        ),
-        const SizedBox(height: 8),
-        Text(label, style: Theme.of(context).textTheme.labelMedium),
-      ],
-    );
+      case CallState.outgoingRinging:
+        return OutgoingCallActions(onCancel: () => _ua.hangup(c.id));
+      case CallState.active:
+        // Hide the bulky action grid behind the keypad — BP does the
+        // same: when the keypad opens, the action row collapses.
+        if (_showKeypad) return const SizedBox.shrink();
+        return ActiveCallActions(
+          muted: _muted,
+          held: c.held,
+          speaker: _speaker,
+          recording: _recording,
+          statsVisible: _showStats,
+          onMute: _toggleMute,
+          onHold: _toggleHold,
+          onSpeaker: _toggleSpeaker,
+          onKeypad: _toggleKeypad,
+          onTransfer: _onTransfer,
+          onRecord: _toggleRecording,
+          onAddCall: _onAddCall,
+          onToggleStats: _toggleStats,
+          onHangup: () => _ua.hangup(c.id),
+        );
+      case CallState.ended:
+        return EndedCallActions(
+          onClose: () => Navigator.of(context).maybePop(),
+          onCallBack: _onCallBack,
+        );
+      case CallState.idle:
+        return const SizedBox.shrink();
+    }
   }
 }

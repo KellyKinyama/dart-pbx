@@ -22,6 +22,9 @@ dependencies:
   sdp_transform: ^0.3.2
   uuid: ^4.3.3
   crypto: ^3.0.3
+  # AES for the Milenage authentication algorithm (3GPP TS 35.205-208 /
+  # RFC 3310 AKAv1-MD5). Pure-Dart, no native deps.
+  pointycastle: ^3.7.4
 
 dev_dependencies:
   lints: ^2.0.0

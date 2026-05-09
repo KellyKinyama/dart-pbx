@@ -1,28 +1,56 @@
 import 'package:flutter/material.dart';
 
-/// Centralised Material 3 theming for the app. A single seed colour drives
-/// both the light and dark palettes so the look stays cohesive while still
-/// adapting to the platform's preferred brightness.
+import 'bp_palette.dart';
+
+/// Centralised Material 3 theming for the app. Seed colour matches the
+/// InnovateAsterisk Browser-Phone accent (#3478F3) so light and dark
+/// schemes produce the same recognisable softphone look.
 class AppTheme {
   AppTheme._();
 
-  static const Color seed = Color(0xFF3D5AFE);
+  static const Color seed = BPColors.primary;
 
   static ThemeData light() => _build(Brightness.light);
   static ThemeData dark() => _build(Brightness.dark);
 
   static ThemeData _build(Brightness brightness) {
-    final scheme = ColorScheme.fromSeed(
-      seedColor: seed,
-      brightness: brightness,
-    );
+    final isDark = brightness == Brightness.dark;
+    var scheme = ColorScheme.fromSeed(seedColor: seed, brightness: brightness);
+    if (isDark) {
+      // Pin the dark surfaces to the exact greys from
+      // `phone.dark.css`, so the chrome reads as the BP softphone
+      // instead of Flutter's default purple-tinted dark surfaces.
+      //   body              #222222   (page)
+      //   .buddy:hover      #333333
+      //   .buddySelected    #404040
+      //   .streamSection    #292929
+      //   .callStatus       #333333
+      //   borders           #3e3e3e
+      //   text              #cccccc
+      scheme = scheme.copyWith(
+        surface: const Color(0xFF222222),
+        onSurface: const Color(0xFFCCCCCC),
+        surfaceContainerLowest: const Color(0xFF1B1B1B),
+        surfaceContainerLow: const Color(0xFF222222),
+        surfaceContainer: const Color(0xFF292929),
+        surfaceContainerHigh: const Color(0xFF333333),
+        surfaceContainerHighest: const Color(0xFF404040),
+        onSurfaceVariant: const Color(0xFF999999),
+        outline: const Color(0xFF3E3E3E),
+        outlineVariant: const Color(0xFF333333),
+      );
+    }
+
     final base = ThemeData(
       useMaterial3: true,
       colorScheme: scheme,
       visualDensity: VisualDensity.standard,
+      extensions: <ThemeExtension<dynamic>>[
+        isDark ? BrowserPhoneColors.dark : BrowserPhoneColors.light,
+      ],
     );
     return base.copyWith(
-      scaffoldBackgroundColor: scheme.surface,
+      scaffoldBackgroundColor: isDark ? BPColors.pageDark : BPColors.pageLight,
       appBarTheme: AppBarTheme(
         backgroundColor: scheme.surface,
         foregroundColor: scheme.onSurface,

@@ -4,6 +4,7 @@ import 'package:dart_pbx/globals.dart';
 import 'package:dart_pbx/logging.dart';
 import 'package:dart_pbx/proxy/proxy.dart';
 import 'package:dart_pbx/proxy/sip_helpers.dart' as h;
+import 'package:dart_pbx/proxy/stateless_proxy.dart';
 import 'package:dart_pbx/services/services.dart';
 import 'package:dart_pbx/sip_client.dart';
 import 'package:dart_pbx/transports/transport.dart';
@@ -103,6 +104,24 @@ class RequestsHandler {
   /// service + authentication).
   void setUpstream(SipClient? upstream) {
     proxy.upstream = upstream;
+    statelessProxy?.upstream = upstream;
+  }
+
+  /// Optional RFC 3261 §16.11 stateless proxy. When non-null every
+  /// non-REGISTER request and every response is routed through this proxy
+  /// instead of the stateful one. The location service (usrloc) is shared,
+  /// so REGISTER continues to populate the bindings the stateless proxy
+  /// reads from.
+  StatelessProxy? statelessProxy;
+
+  /// Enable RFC 3261 §16.11 stateless forwarding. Subsequent non-REGISTER
+  /// traffic is handled by [statelessProxy] instead of the stateful proxy.
+  /// Idempotent.
+  void enableStatelessProxy({SipClient? upstream}) {
+    statelessProxy ??= StatelessProxy(
+      clients: services.usrloc.bindings,
+      upstream: upstream ?? proxy.upstream,
+    );
   }
 
   /// Stops every background timer and clears in-memory state. Call once
@@ -143,6 +162,10 @@ class RequestsHandler {
         onRegister(sipMsg, transport: transport);
         return;
       }
+      // Stateless mode wins when configured (RFC 3261 §16.11).
+      if (statelessProxy != null) {
+        if (statelessProxy!.handleRequest(sipMsg, transport)) return;
+      }
       final handled = proxy.handleRequest(sipMsg, transport);
       if (!handled) {
         Log.warn('sip', 'unhandled method $method');
@@ -162,6 +185,9 @@ class RequestsHandler {
           RegistrarMaintainer.onQualifyResponse(client);
         }
         return;
+      }
+      if (statelessProxy != null) {
+        if (statelessProxy!.handleResponse(sipMsg, transport)) return;
       }
       proxy.handleResponse(sipMsg, transport);
       return;

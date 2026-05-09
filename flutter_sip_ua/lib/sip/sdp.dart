@@ -15,6 +15,7 @@ class SdpAudio {
     this.rtcpPort,
     this.direction = SdpDirection.sendrecv,
     this.telephoneEventPt,
+    this.telephoneEventRange,
   });
 
   /// Connection address from `c=`.
@@ -36,6 +37,10 @@ class SdpAudio {
   /// Payload type for `telephone-event` if the peer offered RFC 4733 DTMF.
   final int? telephoneEventPt;
 
+  /// `a=fmtp:<pt> <range>` value paired with [telephoneEventPt] (e.g.
+  /// `0-15` or `0-16`). Null when no fmtp line was present.
+  final String? telephoneEventRange;
+
   /// Effective RTCP port (explicit if signalled, otherwise port + 1).
   int get effectiveRtcpPort => rtcpPort ?? (port + 1);
 
@@ -51,6 +56,10 @@ class SdpAudio {
 /// Build a minimal SDP offer/answer for a G.711 audio session.
 ///
 /// Also advertises RFC 4733 `telephone-event` (DTMF) on PT 101 by default.
+///
+/// [sessionId] / [sessionVersion] should be supplied (and version
+/// monotonically incremented) for re-INVITEs in the same dialog so the
+/// peer can tell descriptions apart per RFC 4566 §5.2 / RFC 3264 §8.
 String buildG711Offer({
   required String username,
   required String localHost,
@@ -59,9 +68,13 @@ String buildG711Offer({
   G711Variant? second = G711Variant.pcma,
   int? rtcpPort,
   int? telephoneEventPt = 101,
+  String telephoneEventRange = '0-15',
   SdpDirection direction = SdpDirection.sendrecv,
+  int? sessionId,
+  int? sessionVersion,
 }) {
-  final sessionId = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+  final sid = sessionId ?? DateTime.now().millisecondsSinceEpoch ~/ 1000;
+  final ver = sessionVersion ?? sid;
   final pts = <G711Variant>[
     preferred,
     if (second != null && second != preferred) second,
@@ -72,7 +85,7 @@ String buildG711Offer({
 
   final lines = <String>[
     'v=0',
-    'o=$username $sessionId $sessionId IN IP4 $localHost',
+    'o=$username $sid $ver IN IP4 $localHost',
     's=flutter_sip_ua',
     'c=IN IP4 $localHost',
     't=0 0',
@@ -80,7 +93,49 @@ String buildG711Offer({
     for (final v in pts) 'a=rtpmap:${v.payloadType} ${v.rtpmap}/8000',
     if (telephoneEventPt != null) ...[
       'a=rtpmap:$telephoneEventPt telephone-event/8000',
-      'a=fmtp:$telephoneEventPt 0-15',
+      'a=fmtp:$telephoneEventPt $telephoneEventRange',
+    ],
+    if (rtcpPort != null) 'a=rtcp:$rtcpPort',
+    'a=ptime:20',
+    'a=${_directionToken(direction)}',
+  ];
+  return '${lines.join('\r\n')}\r\n';
+}
+
+/// Build an SDP **answer** for a G.711 audio offer, per RFC 3264 §6.
+///
+/// Unlike [buildG711Offer], the resulting `m=audio` line lists *only* the
+/// codec we agreed to use plus (optionally) the peer's telephone-event
+/// payload type — not a fresh full menu. That matters for peers that
+/// pick the first PT from our answer instead of intersecting again.
+String buildG711Answer({
+  required String username,
+  required String localHost,
+  required int localPort,
+  required SdpAudio remoteOffer,
+  int? rtcpPort,
+  SdpDirection direction = SdpDirection.sendrecv,
+  int? sessionId,
+  int? sessionVersion,
+}) {
+  final sid = sessionId ?? DateTime.now().millisecondsSinceEpoch ~/ 1000;
+  final ver = sessionVersion ?? sid;
+  final codec = remoteOffer.codec;
+  final dtmfPt = remoteOffer.telephoneEventPt;
+  final dtmfRange = remoteOffer.telephoneEventRange ?? '0-15';
+  final ptNumbers = <int>[codec.payloadType, if (dtmfPt != null) dtmfPt];
+
+  final lines = <String>[
+    'v=0',
+    'o=$username $sid $ver IN IP4 $localHost',
+    's=flutter_sip_ua',
+    'c=IN IP4 $localHost',
+    't=0 0',
+    'm=audio $localPort RTP/AVP ${ptNumbers.join(' ')}',
+    'a=rtpmap:${codec.payloadType} ${codec.rtpmap}/8000',
+    if (dtmfPt != null) ...[
+      'a=rtpmap:$dtmfPt telephone-event/8000',
+      'a=fmtp:$dtmfPt $dtmfRange',
     ],
     if (rtcpPort != null) 'a=rtcp:$rtcpPort',
     'a=ptime:20',
@@ -112,6 +167,8 @@ SdpAudio? parseSdpAudio(String sdp) {
   int? rtcpPort;
   SdpDirection? direction;
   int? telephoneEventPt;
+  // fmtp parameters keyed by payload type (e.g. {101: '0-16'}).
+  final fmtpByPt = <int, String>{};
   // Track which payload types appear in m= and any rtpmap entries so we
   // can pick PCMU (0) or PCMA (8) deterministically.
   final ptInMedia = <int>[];
@@ -153,6 +210,14 @@ SdpAudio? parseSdpAudio(String sdp) {
       final rest = line.substring('a=rtcp:'.length).trim();
       final tok = rest.split(RegExp(r'\s+')).first;
       rtcpPort = int.tryParse(tok);
+    } else if (inAudio && line.startsWith('a=fmtp:')) {
+      // a=fmtp:<pt> <params>
+      final rest = line.substring('a=fmtp:'.length);
+      final sp = rest.indexOf(' ');
+      if (sp > 0) {
+        final pt = int.tryParse(rest.substring(0, sp));
+        if (pt != null) fmtpByPt[pt] = rest.substring(sp + 1).trim();
+      }
     } else if (inAudio) {
       switch (line) {
         case 'a=sendrecv':
@@ -215,6 +280,9 @@ SdpAudio? parseSdpAudio(String sdp) {
     rtcpPort: rtcpPort,
     direction: direction ?? SdpDirection.sendrecv,
     telephoneEventPt: telephoneEventPt,
+    telephoneEventRange: telephoneEventPt == null
+        ? null
+        : fmtpByPt[telephoneEventPt],
   );
 }
 
@@ -274,12 +342,16 @@ String buildAvOffer({
   G711Variant? audioSecond = G711Variant.pcma,
   int? audioRtcpPort,
   int? telephoneEventPt = 101,
+  String telephoneEventRange = '0-15',
   int videoPayloadType = 96,
   SdpVideoCodec videoCodec = SdpVideoCodec.vp8,
   int? videoRtcpPort,
   SdpDirection direction = SdpDirection.sendrecv,
+  int? sessionId,
+  int? sessionVersion,
 }) {
-  final sessionId = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+  final sid = sessionId ?? DateTime.now().millisecondsSinceEpoch ~/ 1000;
+  final ver = sessionVersion ?? sid;
   final audioPts = <G711Variant>[
     audioPreferred,
     if (audioSecond != null && audioSecond != audioPreferred) audioSecond,
@@ -289,7 +361,7 @@ String buildAvOffer({
 
   final lines = <String>[
     'v=0',
-    'o=$username $sessionId $sessionId IN IP4 $localHost',
+    'o=$username $sid $ver IN IP4 $localHost',
     's=flutter_sip_ua',
     'c=IN IP4 $localHost',
     't=0 0',
@@ -297,7 +369,7 @@ String buildAvOffer({
     for (final v in audioPts) 'a=rtpmap:${v.payloadType} ${v.rtpmap}/8000',
     if (telephoneEventPt != null) ...[
       'a=rtpmap:$telephoneEventPt telephone-event/8000',
-      'a=fmtp:$telephoneEventPt 0-15',
+      'a=fmtp:$telephoneEventPt $telephoneEventRange',
     ],
     if (audioRtcpPort != null) 'a=rtcp:$audioRtcpPort',
     'a=ptime:20',

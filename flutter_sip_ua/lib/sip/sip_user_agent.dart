@@ -61,6 +61,11 @@ class SipCall {
   CallState state;
   DateTime? startedAt;
   DateTime? endedAt;
+
+  /// True while the call is locally or remotely on hold. Mirrors the
+  /// internal context held flag and is updated before [_emitCall] so the
+  /// UI sees the change reactively.
+  bool held = false;
 }
 
 class SipAccount {
@@ -103,22 +108,45 @@ class SipTextMessage {
     required this.from,
     required this.body,
     required this.receivedAt,
+    this.to = '',
+    this.outgoing = false,
   });
   final String from;
+  final String to;
   final String body;
   final DateTime receivedAt;
+  final bool outgoing;
+
+  /// The remote party for this message regardless of direction. Useful when
+  /// grouping messages into a per-buddy thread.
+  String get peer => outgoing ? to : from;
 }
 
 class SipUserAgent {
-  SipUserAgent({Random? rng, AudioSink Function()? audioSinkFactory})
-    : _rng = rng ?? Random.secure(),
-      _digest = DigestClient(),
-      _audioSinkFactory = audioSinkFactory;
+  SipUserAgent({
+    Random? rng,
+    AudioSink Function()? audioSinkFactory,
+    String? publicMediaAddress,
+    RtpPacketTap? rtpPacketTap,
+  }) : _rng = rng ?? Random.secure(),
+       _digest = DigestClient(),
+       _audioSinkFactory = audioSinkFactory,
+       _publicMediaAddress = publicMediaAddress,
+       _rtpPacketTap = rtpPacketTap;
 
   final Random _rng;
   final DigestClient _digest;
   final AudioSink Function()? _audioSinkFactory;
   final _uuid = const Uuid();
+
+  /// Optional override for the host advertised in `c=` / `o=` of every
+  /// SDP we emit. Useful when this client sits behind NAT or in a
+  /// container where the socket-local IP isn't reachable by the peer.
+  /// When null, falls back to the SIP transport's local host.
+  final String? _publicMediaAddress;
+
+  /// Optional RTP/RTCP packet tap. See [RtpPacketTap].
+  final RtpPacketTap? _rtpPacketTap;
 
   /// Optional sink that records every wire-format SIP message to disk.
   /// Set with [attachFileLogger] before calling [start] for full coverage.
@@ -227,7 +255,10 @@ class SipUserAgent {
     final cseq = _nextCseq();
 
     // Bind a local RTP port and put it in our SDP offer.
-    final media = MediaSession(sink: _audioSinkFactory?.call());
+    final media = MediaSession(
+      sink: _audioSinkFactory?.call(),
+      packetTap: _rtpPacketTap,
+    );
     final rtpPort = await media.bindLocalPort();
 
     VideoSession? video;
@@ -237,17 +268,24 @@ class SipUserAgent {
       videoPort = await video.bindLocalPort();
     }
 
+    final sdpSid = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final body = video == null
         ? buildG711Offer(
             username: acc.username,
             localHost: _mediaLocalHost(),
             localPort: rtpPort,
+            rtcpPort: media.localRtcpPort,
+            sessionId: sdpSid,
+            sessionVersion: sdpSid,
           )
         : buildAvOffer(
             username: acc.username,
             localHost: _mediaLocalHost(),
             audioPort: rtpPort,
             videoPort: videoPort,
+            audioRtcpPort: media.localRtcpPort,
+            sessionId: sdpSid,
+            sessionVersion: sdpSid,
           );
 
     final extra = <String, String>{
@@ -284,6 +322,7 @@ class SipUserAgent {
       branch: branch,
       proposedSE: acc.sessionExpires,
       minSE: acc.minSE,
+      sdpSessionId: sdpSid,
     );
     ctx.media = media;
     ctx.video = video;
@@ -317,6 +356,7 @@ class SipUserAgent {
     if (ctx.call.state != CallState.active) return null;
     if (ctx.held == hold) return ctx.held;
     ctx.held = hold;
+    ctx.call.held = hold;
     final media = ctx.media;
     if (media != null) media.muted = hold;
     _sendReinvite(ctx);
@@ -378,12 +418,20 @@ class SipUserAgent {
     if (acc == null) return;
 
     // Bind RTP socket and parse the peer's offer so we know where to send.
-    final media = MediaSession(sink: _audioSinkFactory?.call());
+    final media = MediaSession(
+      sink: _audioSinkFactory?.call(),
+      packetTap: _rtpPacketTap,
+    );
     final rtpPort = await media.bindLocalPort();
     ctx.media = media;
     final offer = parseSdp(ctx.lastInvite.body);
     final remoteAudio = offer.audio;
     final remoteVideo = offer.video;
+    if (remoteAudio != null) {
+      ctx.negotiatedAudioCodec = remoteAudio.codec;
+      ctx.negotiatedDtmfPt = remoteAudio.telephoneEventPt;
+      ctx.negotiatedDtmfRange = remoteAudio.telephoneEventRange;
+    }
 
     VideoSession? video;
     int? videoPort;
@@ -394,20 +442,38 @@ class SipUserAgent {
     }
 
     final answerSdp = video == null
-        ? buildG711Offer(
-            username: acc.username,
-            localHost: _mediaLocalHost(),
-            localPort: rtpPort,
-            preferred: remoteAudio?.codec ?? G711Variant.pcmu,
-          )
+        ? (remoteAudio == null
+              ? buildG711Offer(
+                  username: acc.username,
+                  localHost: _mediaLocalHost(),
+                  localPort: rtpPort,
+                  rtcpPort: media.localRtcpPort,
+                  sessionId: ctx.sdpSessionId,
+                  sessionVersion: ctx.bumpSdpVersion(),
+                )
+              : buildG711Answer(
+                  username: acc.username,
+                  localHost: _mediaLocalHost(),
+                  localPort: rtpPort,
+                  remoteOffer: remoteAudio,
+                  rtcpPort: media.localRtcpPort,
+                  sessionId: ctx.sdpSessionId,
+                  sessionVersion: ctx.bumpSdpVersion(),
+                ))
         : buildAvOffer(
             username: acc.username,
             localHost: _mediaLocalHost(),
             audioPort: rtpPort,
             videoPort: videoPort,
+            audioRtcpPort: media.localRtcpPort,
             audioPreferred: remoteAudio?.codec ?? G711Variant.pcmu,
+            audioSecond: null,
+            telephoneEventPt: remoteAudio?.telephoneEventPt,
+            telephoneEventRange: remoteAudio?.telephoneEventRange ?? '0-15',
             videoPayloadType: remoteVideo!.payloadType,
             videoCodec: remoteVideo.codec,
+            sessionId: ctx.sdpSessionId,
+            sessionVersion: ctx.bumpSdpVersion(),
           );
 
     // RFC 4028: if the peer asked for timers, accept and choose refresher.
@@ -480,6 +546,17 @@ class SipUserAgent {
       body: text,
     );
     _send(msg);
+    // Echo the outbound message into the message stream so that UIs which
+    // render two-sided threads can show the sent line immediately.
+    _messageCtl.add(
+      SipTextMessage(
+        from: acc.aor,
+        to: targetUri,
+        body: text,
+        receivedAt: DateTime.now(),
+        outgoing: true,
+      ),
+    );
   }
 
   // ===========================================================================
@@ -563,6 +640,11 @@ class SipUserAgent {
           final answer = parseSdp(msg.body);
           final remoteAudio = answer.audio;
           final remoteVideo = answer.video;
+          if (remoteAudio != null) {
+            ctx.negotiatedAudioCodec = remoteAudio.codec;
+            ctx.negotiatedDtmfPt = remoteAudio.telephoneEventPt;
+            ctx.negotiatedDtmfRange = remoteAudio.telephoneEventRange;
+          }
           final media = ctx.media;
           if (media != null && remoteAudio != null) {
             media.start(remoteAudio.toEndpoint()).catchError((e) {
@@ -681,6 +763,7 @@ class SipUserAgent {
             offered.direction == SdpDirection.inactive;
         if (peerHolds != wasHeld) {
           existing.held = peerHolds;
+          existing.call.held = peerHolds;
           // Stop sending audio while the peer holds us; resume on unhold.
           existing.media?.muted = peerHolds;
           _emitCall(existing.call);
@@ -700,7 +783,9 @@ class SipUserAgent {
           200,
           'OK',
           addToTag: existing.localTag,
-          sdp: acc == null ? null : _buildOfferSdpForCall(existing, acc),
+          sdp: acc == null
+              ? null
+              : _buildAnswerSdpForCall(existing, acc, offered),
           extra: extra,
         ),
       );
@@ -1280,16 +1365,89 @@ class SipUserAgent {
       localPort: port,
       rtcpPort: rtcp,
       direction: ctx.held ? SdpDirection.sendonly : SdpDirection.sendrecv,
+      sessionId: ctx.sdpSessionId,
+      sessionVersion: ctx.bumpSdpVersion(),
     );
   }
 
-  /// Best-effort "public" host to put in `c=` / `o=`. Falls back to the
-  /// SIP transport's local host if it isn't 0.0.0.0.
+  /// Build the SDP body for a 200 OK to a peer-sent (re-)INVITE.
+  ///
+  /// RFC 3264 \u00a78: a re-INVITE answer must stay within what was already
+  /// negotiated; it is **not** a fresh offer. We pick the codec from the
+  /// new offer if it intersects with the previously-agreed codec, else
+  /// fall back to the new offer's first codec, else fall back to the
+  /// cached one. The bound RTP port and direction (hold/active) come from
+  /// the call context, same as outbound offers.
+  String _buildAnswerSdpForCall(
+    _CallContext ctx,
+    SipAccount acc,
+    SdpAudio? newOffer,
+  ) {
+    final media = ctx.media;
+    final port = media?.localPort ?? 0;
+    final rtcp = media?.localRtcpPort;
+    final direction = ctx.held ? SdpDirection.sendonly : SdpDirection.sendrecv;
+
+    SdpAudio? answerOffer = newOffer;
+    if (answerOffer == null && ctx.negotiatedAudioCodec != null) {
+      // Re-INVITE without an offer body: synthesise one from cached state
+      // so the answer stays consistent with the original negotiation.
+      answerOffer = SdpAudio(
+        host: _mediaLocalHost(),
+        port: port,
+        codec: ctx.negotiatedAudioCodec!,
+        telephoneEventPt: ctx.negotiatedDtmfPt,
+        telephoneEventRange: ctx.negotiatedDtmfRange,
+      );
+    }
+    if (answerOffer == null) {
+      // No offer and nothing cached \u2014 must be the very first response and
+      // we have no codec context. Fall back to a full G.711 offer so the
+      // call doesn't stall, even though strictly this isn't an answer.
+      return buildG711Offer(
+        username: acc.username,
+        localHost: _mediaLocalHost(),
+        localPort: port,
+        rtcpPort: rtcp,
+        direction: direction,
+        sessionId: ctx.sdpSessionId,
+        sessionVersion: ctx.bumpSdpVersion(),
+      );
+    }
+    // Update cached negotiation so subsequent re-INVITEs stay in sync.
+    ctx.negotiatedAudioCodec = answerOffer.codec;
+    ctx.negotiatedDtmfPt = answerOffer.telephoneEventPt;
+    ctx.negotiatedDtmfRange = answerOffer.telephoneEventRange;
+    return buildG711Answer(
+      username: acc.username,
+      localHost: _mediaLocalHost(),
+      localPort: port,
+      remoteOffer: answerOffer,
+      rtcpPort: rtcp,
+      direction: direction,
+      sessionId: ctx.sdpSessionId,
+      sessionVersion: ctx.bumpSdpVersion(),
+    );
+  }
+
+  /// Best-effort "public" host to put in `c=` / `o=`. Prefers an explicit
+  /// override; otherwise the SIP transport's local host. Refuses to emit
+  /// `0.0.0.0` / `::` which most SBCs interpret as hold-equivalent —
+  /// falls back to loopback in that case so the call at least connects on
+  /// a single host while the operator notices the warning.
   String _mediaLocalHost() {
+    final override = _publicMediaAddress?.trim();
+    if (override != null && override.isNotEmpty) return override;
     final tx = _transport;
-    if (tx == null) return '0.0.0.0';
+    if (tx == null) return '127.0.0.1';
     final h = tx.localHost;
-    if (h.isEmpty || h == '0.0.0.0' || h == '::') return '0.0.0.0';
+    if (h.isEmpty || h == '0.0.0.0' || h == '::') {
+      _log(
+        'sdp: transport local host is unspecified ($h); '
+        'falling back to 127.0.0.1 — set publicMediaAddress for real deployments',
+      );
+      return '127.0.0.1';
+    }
     return h;
   }
 
@@ -1360,7 +1518,11 @@ class _CallContext {
     required this.branch,
     this.proposedSE,
     this.minSE,
-  });
+    int? sdpSessionId,
+  }) : sdpSessionId =
+           sdpSessionId ?? DateTime.now().millisecondsSinceEpoch ~/ 1000,
+       sdpVersion =
+           sdpSessionId ?? DateTime.now().millisecondsSinceEpoch ~/ 1000;
 
   final SipCall call;
   final String localTag;
@@ -1370,6 +1532,16 @@ class _CallContext {
   String branch;
   SipMessage lastInvite;
   int authAttempts = 0;
+
+  /// Stable `o=` session id for the lifetime of this dialog (RFC 4566 §5.2).
+  final int sdpSessionId;
+
+  /// Monotonically incremented `o=` version. Bump via [bumpSdpVersion]
+  /// before every outgoing offer/answer that re-describes the session.
+  int sdpVersion;
+
+  /// Returns the new version after incrementing.
+  int bumpSdpVersion() => ++sdpVersion;
 
   /// Active media plane (mic capture + RTP socket). Null until the call is
   /// being set up, and again once it ends.
@@ -1382,6 +1554,15 @@ class _CallContext {
   /// True once a hold re-INVITE has been sent and 200-OK confirmed (or
   /// optimistically, while the re-INVITE is in flight).
   bool held = false;
+
+  /// Codec we agreed to use after the initial offer/answer. Used when a
+  /// peer-initiated re-INVITE arrives so we re-emit an answer that's a
+  /// strict intersection (RFC 3264 §8) instead of a fresh full menu.
+  G711Variant? negotiatedAudioCodec;
+
+  /// Telephone-event PT and fmtp range carried alongside [negotiatedAudioCodec].
+  int? negotiatedDtmfPt;
+  String? negotiatedDtmfRange;
 
   // RFC 4028 state.
   int? proposedSE;

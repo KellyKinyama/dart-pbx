@@ -54,6 +54,18 @@ void main() async {
   final services = ServiceRegistry(auth: authService);
   configureRequestsHandler(services: services);
 
+  // Optional: switch to RFC 3261 §16.11 stateless forwarding for everything
+  // that isn't REGISTER. The location service still owns REGISTER; only
+  // request/response routing changes. Media is never anchored either way.
+  final useStateless =
+      (env['SIP_PROXY_MODE'] ?? '').toLowerCase() == 'stateless';
+  if (useStateless) {
+    requestsHander.enableStatelessProxy();
+    print('SIP proxy mode: STATELESS (RFC 3261 §16.11)');
+  } else {
+    print('SIP proxy mode: STATEFUL (RFC 3261 §16.10)');
+  }
+
   String? udpIp = env['UPD_SERVER_ADDRESS'];
   int? udpPort = env['UDP_SERVER_PORT'] != null
       ? int.parse(env['UDP_SERVER_PORT']!)

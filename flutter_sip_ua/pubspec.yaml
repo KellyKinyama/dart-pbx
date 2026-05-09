@@ -1,8 +1,8 @@
 name: flutter_sip_ua
 description: "Pure-Dart SIP user agent for the dart-pbx server (signalling only)."
-# The following line prevents the package from being accidentally published to
-# pub.dev using `flutter pub publish`. This is preferred for private packages.
-publish_to: 'none' # Remove this line if you wish to publish to pub.dev
+homepage: https://github.com/KellyKinyama/flutter_sip_ua
+repository: https://github.com/KellyKinyama/flutter_sip_ua
+issue_tracker: https://github.com/KellyKinyama/flutter_sip_ua/issues
 
 # The following defines the version and build number for your application.
 # A version number is three numbers separated by dots, like 1.2.43
@@ -43,8 +43,10 @@ dependencies:
   # from ipcjs/g711_flutter and KellyKinyama/dart-rtp-packet under lib/sip/audio).
   # Microphone capture is a hardware concern, so we use a thin platform plugin
   # — no audio engine, no codecs, no WebRTC.
-  mic_stream: ^0.7.1           # raw 16-bit PCM stream from the microphone
   permission_handler: ^11.3.1  # RECORD_AUDIO runtime permission
+  record: ^6.2.0
+  flutter_pcm_sound: ^3.3.3
+  flutter_riverpod: ^3.3.1
 
 dev_dependencies:
   flutter_test:
